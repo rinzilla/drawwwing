@@ -2,82 +2,323 @@
 <html>
 <head>
     <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <meta name="apple-mobile-web-app-capable" content="yes">
     <title>Telegram Draw App</title>
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
     <style>
-        body { margin: 0; padding: 10px; font-family: Arial; }
-        canvas { background: white; border: 1px solid #ccc; }
-        .tools { margin: 10px 0; }
-        button { padding: 8px; margin-right: 5px; }
+        body {
+            margin: 0;
+            padding: 10px;
+            font-family: Arial;
+            overscroll-behavior-y: contain;
+            overflow: hidden;
+            position: fixed;
+            width: 100%;
+            height: 100%;
+            touch-action: none;
+            -webkit-touch-callout: none;
+            -webkit-user-select: none;
+            user-select: none;
+            background: #f5f5f5;
+        }
+        canvas {
+            touch-action: none;
+            -ms-touch-action: none;
+            background: white;
+            display: block;
+            margin: 10px auto;
+            border-radius: 8px;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+        }
+        .tools {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 5px;
+            justify-content: center;
+            margin: 10px 0;
+        }
+        button, .tool-btn {
+            padding: 8px 12px;
+            border: none;
+            border-radius: 20px;
+            background: #0088cc;
+            color: white;
+            font-size: 14px;
+            cursor: pointer;
+        }
+        .tool-btn.active {
+            background: #005580;
+        }
+        input[type="color"] {
+            width: 40px;
+            height: 40px;
+            border: none;
+            border-radius: 50%;
+            padding: 0;
+        }
+        .size-selector {
+            display: flex;
+            align-items: center;
+            gap: 5px;
+        }
+        .pen-size {
+            width: 20px;
+            height: 20px;
+            border-radius: 50%;
+            background: currentColor;
+        }
     </style>
 </head>
 <body>
     <div class="tools">
-        <input type="color" id="colorPicker">
-        <button onclick="changeSize(2)">Тонкая</button>
-        <button onclick="changeSize(10)">Толстая</button>
+        <input type="color" id="colorPicker" value="#000000">
+        <button id="penBtn" class="tool-btn active">Кисть</button>
+        <button id="eraserBtn" class="tool-btn">Ластик</button>
+        <div class="size-selector">
+            <span class="pen-size" style="transform: scale(0.5);"></span>
+            <input type="range" id="sizeSlider" min="1" max="50" value="5">
+            <span class="pen-size" style="transform: scale(1.5);"></span>
+        </div>
         <button onclick="clearCanvas()">Очистить</button>
         <button onclick="saveImage()">✅ Сохранить</button>
     </div>
-    <canvas id="drawCanvas" width="400" height="400"></canvas>
+    <canvas id="drawCanvas" width="400" height="500"></canvas>
 
     <script>
         // Инициализация Web App
-        Telegram.WebApp.expand();
-        Telegram.WebApp.enableClosingConfirmation();
+        if (typeof Telegram !== 'undefined' && Telegram.WebApp) {
+            Telegram.WebApp.expand();
+            Telegram.WebApp.enableClosingConfirmation();
+        }
 
+        // Элементы
         const canvas = document.getElementById('drawCanvas');
         const ctx = canvas.getContext('2d');
+        const colorPicker = document.getElementById('colorPicker');
+        const penBtn = document.getElementById('penBtn');
+        const eraserBtn = document.getElementById('eraserBtn');
+        const sizeSlider = document.getElementById('sizeSlider');
+
+        // Состояние
         let isDrawing = false;
+        let lastX = 0;
+        let lastY = 0;
+        let currentTool = 'pen';
         let currentColor = '#000000';
         let currentSize = 5;
+        let paths = [];
+        let currentPath = [];
+        let history = [];
+        let historyIndex = -1;
 
-        // Обработчики рисования
-        canvas.addEventListener('mousedown', startDrawing);
-        canvas.addEventListener('mousemove', draw);
-        canvas.addEventListener('mouseup', endDrawing);
+        // Размеры холста
+        function resizeCanvas() {
+            const maxWidth = window.innerWidth - 20;
+            const maxHeight = window.innerHeight - 150;
+            const ratio = Math.min(maxWidth / 400, maxHeight / 500);
+            
+            canvas.style.width = (400 * ratio) + 'px';
+            canvas.style.height = (500 * ratio) + 'px';
+        }
 
+        // Инициализация
+        function init() {
+            resizeCanvas();
+            window.addEventListener('resize', resizeCanvas);
+            
+            // Белый фон
+            ctx.fillStyle = 'white';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            saveState();
+            
+            // События мыши
+            canvas.addEventListener('mousedown', startDrawing);
+            canvas.addEventListener('mousemove', draw);
+            canvas.addEventListener('mouseup', endDrawing);
+            canvas.addEventListener('mouseout', endDrawing);
+            
+            // События касания
+            canvas.addEventListener('touchstart', handleTouchStart, { passive: false });
+            canvas.addEventListener('touchmove', handleTouchMove, { passive: false });
+            canvas.addEventListener('touchend', handleTouchEnd);
+            
+            // UI события
+            colorPicker.addEventListener('input', (e) => {
+                currentColor = e.target.value;
+                if (currentTool === 'pen') {
+                    setActiveTool('pen');
+                }
+            });
+            
+            penBtn.addEventListener('click', () => setActiveTool('pen'));
+            eraserBtn.addEventListener('click', () => setActiveTool('eraser'));
+            sizeSlider.addEventListener('input', (e) => {
+                currentSize = parseInt(e.target.value);
+            });
+            
+            // Поддержка стилуса (Pressure)
+            canvas.addEventListener('pointerdown', handlePointer);
+            canvas.addEventListener('pointermove', handlePointer);
+            canvas.addEventListener('pointerup', handlePointer);
+        }
+
+        // Обработка стилуса
+        function handlePointer(e) {
+            if (e.pointerType === 'pen') {
+                if (e.type === 'pointerdown') {
+                    currentSize = Math.max(1, e.pressure * 30);
+                    startDrawing(e);
+                } else if (e.type === 'pointermove' && isDrawing) {
+                    currentSize = Math.max(1, e.pressure * 30);
+                    draw(e);
+                } else if (e.type === 'pointerup') {
+                    endDrawing();
+                }
+            }
+        }
+
+        // Выбор инструмента
+        function setActiveTool(tool) {
+            currentTool = tool;
+            if (tool === 'pen') {
+                penBtn.classList.add('active');
+                eraserBtn.classList.remove('active');
+                ctx.globalCompositeOperation = 'source-over';
+                ctx.strokeStyle = currentColor;
+            } else if (tool === 'eraser') {
+                penBtn.classList.remove('active');
+                eraserBtn.classList.add('active');
+                ctx.globalCompositeOperation = 'destination-out';
+            }
+        }
+
+        // Начало рисования
         function startDrawing(e) {
             isDrawing = true;
-            draw(e);
+            const pos = getPosition(e);
+            lastX = pos.x;
+            lastY = pos.y;
+            currentPath = [{ x: lastX, y: lastY, size: currentSize }];
+            paths.push(currentPath);
+            
+            ctx.beginPath();
+            ctx.moveTo(lastX, lastY);
+            ctx.lineCap = 'round';
+            ctx.lineJoin = 'round';
+            ctx.lineWidth = currentSize;
         }
 
+        // Рисование
         function draw(e) {
             if (!isDrawing) return;
-            ctx.lineWidth = currentSize;
-            ctx.lineCap = 'round';
-            ctx.strokeStyle = currentColor;
-            ctx.lineTo(e.clientX - canvas.offsetLeft, e.clientY - canvas.offsetTop);
+            
+            const pos = getPosition(e);
+            const newX = pos.x;
+            const newY = pos.y;
+            
+            // Плавные линии
+            ctx.lineTo(newX, newY);
             ctx.stroke();
-            ctx.beginPath();
-            ctx.moveTo(e.clientX - canvas.offsetLeft, e.clientY - canvas.offsetTop);
+            
+            // Сохраняем точку в текущий путь
+            currentPath.push({ x: newX, y: newY, size: currentSize });
+            
+            lastX = newX;
+            lastY = newY;
         }
 
+        // Конец рисования
         function endDrawing() {
-            isDrawing = false;
-            ctx.beginPath();
+            if (isDrawing) {
+                isDrawing = false;
+                saveState();
+            }
         }
 
-        function changeSize(size) {
-            currentSize = size;
-        }
-
+        // Очистка холста
         function clearCanvas() {
-            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            ctx.fillStyle = 'white';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            paths = [];
+            saveState();
         }
 
-        // Отправка изображения в Telegram
+        // Сохранение состояния для Undo
+        function saveState() {
+            history = history.slice(0, historyIndex + 1);
+            history.push(canvas.toDataURL());
+            historyIndex++;
+        }
+
+        // Получение позиции
+        function getPosition(e) {
+            let clientX, clientY;
+            
+            if (e.touches) {
+                clientX = e.touches[0].clientX;
+                clientY = e.touches[0].clientY;
+            } else {
+                clientX = e.clientX;
+                clientY = e.clientY;
+            }
+            
+            const rect = canvas.getBoundingClientRect();
+            const scaleX = canvas.width / rect.width;
+            const scaleY = canvas.height / rect.height;
+            
+            return {
+                x: (clientX - rect.left) * scaleX,
+                y: (clientY - rect.top) * scaleY
+            };
+        }
+
+        // Touch события
+        function handleTouchStart(e) {
+            e.preventDefault();
+            const touch = e.touches[0];
+            const mouseEvent = new MouseEvent("mousedown", {
+                clientX: touch.clientX,
+                clientY: touch.clientY
+            });
+            startDrawing(mouseEvent);
+        }
+
+        function handleTouchMove(e) {
+            e.preventDefault();
+            const touch = e.touches[0];
+            const mouseEvent = new MouseEvent("mousemove", {
+                clientX: touch.clientX,
+                clientY: touch.clientY
+            });
+            draw(mouseEvent);
+        }
+
+        function handleTouchEnd(e) {
+            e.preventDefault();
+            const mouseEvent = new MouseEvent("mouseup", {});
+            endDrawing(mouseEvent);
+        }
+
+        // Сохранение изображения
         function saveImage() {
             canvas.toBlob(function(blob) {
-                Telegram.WebApp.sendData(blob);
-                Telegram.WebApp.close();
-            }, 'image/png');
+                if (typeof Telegram !== 'undefined' && Telegram.WebApp) {
+                    // В Web App Telegram
+                    Telegram.WebApp.sendData(blob);
+                    Telegram.WebApp.close();
+                } else {
+                    // В обычном браузере
+                    const link = document.createElement('a');
+                    link.download = 'drawing.png';
+                    link.href = URL.createObjectURL(blob);
+                    link.click();
+                }
+            }, 'image/png', 1);
         }
 
-        // Смена цвета
-        document.getElementById('colorPicker').addEventListener('input', (e) => {
-            currentColor = e.target.value;
-        });
+        // Запуск приложения
+        init();
     </script>
 </body>
 </html>
